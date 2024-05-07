@@ -1,0 +1,245 @@
+---
+title: "final_project"
+author: "Yixiao Sun"
+date: "2024-05-04"
+output: pdf_document
+---
+
+```{r message=FALSE}
+library(tidyverse)
+library(summarytools)
+library(leaps)
+library(corrplot)
+library(dplyr)
+library(ggplot2)
+library(ISLR)
+library(glmnet)
+library(caret)
+library(tidymodels)
+library(plotmo)
+library(earth)
+library(pls)
+library(rpart.plot)
+library(gbm)
+library(ranger)
+
+```
+
+```{r}
+load("severity_test.RData")
+load("severity_training.RData")
+test_data<-test_data[,-1]
+training_data<-training_data[,-1]
+data<-rbind(training_data,test_data)
+
+data_vis = subset(data, select = -c(gender, race, smoking, hypertension, diabetes, vaccine,height,weight))
+
+featurePlot(x = data_vis[, 1:5],
+            y = data_vis$severity,
+            scales = list(x = list(relation = "free"),
+                          y = list(relation = "free")),
+            plot = "box")
+
+
+columns_to_convert <- c("gender", "race", "smoking", "hypertension", "diabetes", "vaccine", "severity")
+
+data <- data %>% mutate(across(all_of(columns_to_convert), as.numeric))
+
+numeric_data <- data[, c("age", "gender", "race", "smoking", "height", "weight", "bmi", "hypertension", "diabetes", "SBP", "LDL", "vaccine", "severity","depression")]
+
+correlation_matrix <- cor(numeric_data)
+correlation_df <- as.data.frame(as.table(correlation_matrix))
+names(correlation_df) <- c("Var1", "Var2", "Correlation")
+
+ggplot(correlation_df, aes(x = Var1, y = Var2, fill = Correlation)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", 
+                       midpoint = 0, limits = c(-1, 1), 
+                       name = "Correlation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+        axis.text.y = element_text(angle = 45, vjust = 1, hjust = 1))
+
+train_data <- training_data %>% 
+  dplyr::select(-height, -weight, -hypertension) %>%
+  dplyr::mutate(severity = ifelse(severity == 0, "Notsevere","Severe"))%>%
+  dplyr::mutate(gender = as.factor(gender),
+         race = as.factor(race),
+         smoking = as.factor(smoking),
+         diabetes = as.factor(diabetes),
+         vaccine = as.factor(vaccine),
+         severity = as.factor(severity))
+
+test_data <- test_data %>% 
+  dplyr::select(-height, -weight, -hypertension)%>%
+  dplyr::mutate(severity = ifelse(severity == 0, "Notsevere","Severe"))%>%
+  dplyr::mutate(gender = as.factor(gender),
+         race = as.factor(race),
+         smoking = as.factor(smoking),
+         diabetes = as.factor(diabetes),
+         vaccine = as.factor(vaccine),
+         severity = as.factor(severity))
+```
+
+```{r}
+ctrl1 <- trainControl(method = "cv", number = 10,summaryFunction = twoClassSummary,classProbs = TRUE)
+
+set.seed(1)
+
+enet.fit <- train(severity ~ .,
+                  data = train_data,
+                  method = "glmnet",
+                  tuneGrid = expand.grid(alpha = seq(0,1,length = 21),
+                                         lambda = exp(seq(1, -7, length = 100))),
+                  metric = "ROC",
+                  trControl = ctrl1)
+enet.fit$bestTune
+print(coef(enet.fit$finalModel,enet.fit$bestTune$lambda))
+plot(enet.fit, xTrans = log)
+
+set.seed(1)
+predict_prob <- predict(enet.fit, newdata = test_data)
+confusionMatrix(data = predict_prob, reference = test_data$severity)
+```
+
+```{r warning=FALSE}
+set.seed(1)
+mars.fit <- train(severity ~.,
+                    data = train_data,
+                    method = "earth",
+                    tuneGrid = expand.grid(degree = 1:4,
+                                           nprune = 2:20),
+                  metric = "ROC",
+                  trControl = ctrl1)
+plot(mars.fit)
+
+bwplot(resamples(list(enet = enet.fit, mars = mars.fit)), matrix = "ROC")
+
+predict_prob2 <- predict(mars.fit, newdata = test_data)
+confusionMatrix(data = predict_prob2, reference = test_data$severity)
+```
+
+```{r}
+set.seed(1)
+library(MASS)
+lda.fit <- train(severity ~ ., 
+                   data = train_data,
+                   method = "lda",
+                   metric = "ROC",
+                   trControl = ctrl1)
+lda<-lda(severity ~ ., data = train_data)
+plot(lda)
+
+lda.model = lda(severity~., data = train_data)
+lda.model$scaling
+head(predict(lda.model)$x)
+
+predict_prob3 <- predict(lda.fit, newdata = test_data)
+confusionMatrix(data = predict_prob3, reference = test_data$severity)
+```
+
+
+
+```{r}
+ctrl <-trainControl(method = "cv")
+set.seed(1)
+
+rpart.fit <- train(severity ~ . ,
+                   train_data,
+                   method = "rpart",
+                   tuneGrid = data.frame(cp = exp(seq(-6,-2, length = 100))), 
+                   trControl = ctrl)
+
+plot(rpart.fit, xTrans = log)
+
+rpart.plot(rpart.fit$finalModel)
+predict_prob4 <- predict(rpart.fit, newdata = test_data)
+confusionMatrix(data = predict_prob4, reference = test_data$severity)
+
+```
+
+```{r}
+set.seed(1)
+ctrl2 <- trainControl(method = "cv",
+                     classProbs = TRUE,
+                     summaryFunction = twoClassSummary)
+
+rf.grid <- expand.grid(mtry = 1:8,
+                       splitrule = "gini",
+                       min.node.size = seq(from = 2, to = 16, by = 2))
+
+rf.fit <- train(severity ~ . ,
+                train_data,
+                method = "ranger",
+                tuneGrid = rf.grid,
+                metric = "ROC",
+                trControl = ctrl2)
+ggplot(rf.fit, highlight = TRUE)
+
+
+predict_prob5 <- predict(rf.fit, newdata = test_data)
+confusionMatrix(data = predict_prob5, reference = test_data$severity)
+
+
+rf2.final.per <- ranger(severity ~ . ,
+                        train_data,
+                        mtry = rf.fit$bestTune[[1]],
+                        min.node.size = rf.fit$bestTune[[3]],
+                        splitrule = "gini",
+                        importance = "permutation",
+                        scale.permutation.importance = TRUE)
+
+barplot(sort(ranger::importance(rf2.final.per), decreasing = FALSE),
+        las = 2, horiz = TRUE, cex.names = 0.7,
+        col = colorRampPalette(colors = c("cyan","blue"))(8))
+```
+
+```{r}
+set.seed(1)
+gbmA.grid <- expand.grid(n.trees = c(2000,3000,4000,5000),
+                         interaction.depth = 1:6,
+                         shrinkage = c(0.001, 0.002, 0.003),
+                         n.minobsinnode = 1)
+
+gbmA.fit <- train(severity ~ . ,
+                  train_data,
+                  tuneGrid = gbmA.grid,
+                  trControl = ctrl2,
+                  method = "gbm",
+                  distribution = "adaboost",
+                  metric = "ROC",
+                  verbose = FALSE)
+
+ggplot(gbmA.fit, highlight = TRUE)
+
+summary(gbmA.fit$finalModel, las = 2, cBars = 19, cex.names = 0.6)
+predict_prob6 <- predict(gbmA.fit, newdata = test_data)
+confusionMatrix(data = predict_prob6, reference = test_data$severity)
+```
+
+
+```{r}
+set.seed(1)
+svml.fit <- train(severity ~.,
+                  data = train_data,
+                  method = "svmLinear",
+                  tuneGrid = data.frame(C = exp(seq(-8, 2, len = 50))), trControl = ctrl2)
+plot(svml.fit, highlight = TRUE, xTrans = log)
+
+svml.fit$bestTune
+
+predict_prob7 <- predict(svml.fit, newdata = test_data)
+confusionMatrix(data = predict_prob7, reference = test_data$severity)
+```
+
+
+
+
+
+```{r}
+bwplot(resamples(list(enet = enet.fit, mars = mars.fit, lda = lda.fit, rf = rf.fit,gbm = gbmA.fit, svm = svml.fit)), matrix = "RMSE")
+resamp<-resamples(list(enet = enet.fit, mars = mars.fit, lda = lda.fit, rf = rf.fit, gbm = gbmA.fit, svm = svml.fit))
+summary(resamp)
+bwplot(resamp, metric = "ROC")
+```
+
